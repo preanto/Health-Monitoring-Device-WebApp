@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Live Health Monitor</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    .alert {
+      color: red;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <h2>Heart Rate: <span id="hr">--</span> BPM</h2>
+  <div id="hrAlert" class="alert"></div>
+
+  <h2>SpO2: <span id="spo2">--</span> %</h2>
+  <div id="spo2Alert" class="alert"></div>
+
+  <canvas id="ecgChart" width="800" height="300"></canvas>
+  <br>
+  <button onclick="connectSerial()">Connect ESP via USB</button>
+
+  <script>
+    let port;
+    const ecgData = {
+      labels: [],
+      datasets: [{
+        label: 'ECG Signal',
+        data: [],
+        borderColor: 'red',
+        fill: false,
+        tension: 0.1
+      }]
+    };
+    const ecgChart = new Chart(document.getElementById('ecgChart'), {
+      type: 'line',
+      data: ecgData,
+      options: {
+        animation: false,
+        scales: {
+          x: { display: false },
+          y: { suggestedMin: 0, suggestedMax: 1024 }
+        }
+      }
+    });
+
+    async function connectSerial() {
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 });
+
+        const decoder = new TextDecoderStream();
+        port.readable.pipeTo(decoder.writable);
+        const inputStream = decoder.readable.getReader();
+
+        while (true) {
+          const { value, done } = await inputStream.read();
+          if (done) {
+            inputStream.releaseLock();
+            break;
+          }
+          if (value) processLine(value.trim());
+        }
+      } catch (err) {
+        alert("Failed to connect: " + err);
+      }
+    }
+
+    function processLine(line) {
+      console.log("Received:", line);
+      if (!line.includes(",")) return;
+
+      const [hr, spo2, ecg] = line.split(",").map(parseFloat);
+      if (isNaN(hr) || isNaN(spo2) || isNaN(ecg)) return;
+
+      // Update values
+      document.getElementById('hr').innerText = hr.toFixed(1);
+      document.getElementById('spo2').innerText = spo2.toFixed(1);
+
+      // Check for heart rate alert
+      const hrAlert = document.getElementById('hrAlert');
+      if (hr > 120) {
+        hrAlert.innerText = "⚠️ High heart rate!";
+      } else if (hr < 50) {
+        hrAlert.innerText = "⚠️ Low heart rate!";
+      } else {
+        hrAlert.innerText = "";
+      }
+
+      // Check for SpO2 alert
+      const spo2Alert = document.getElementById('spo2Alert');
+      if (spo2 < 90) {
+        spo2Alert.innerText = "⚠️ Low SpO2 level!";
+      } else {
+        spo2Alert.innerText = "";
+      }
+
+      // Update ECG chart
+      ecgData.labels.push('');
+      ecgData.datasets[0].data.push(ecg);
+      if (ecgData.labels.length > 100) {
+        ecgData.labels.shift();
+        ecgData.datasets[0].data.shift();
+      }
+      ecgChart.update();
+    }
+  </script>
+</body>
+</html>
