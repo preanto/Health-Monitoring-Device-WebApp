@@ -4,10 +4,7 @@
   <title>Live Health Monitor</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
-    .alert {
-      color: red;
-      font-weight: bold;
-    }
+    .alert { color: red; font-weight: bold; }
   </style>
 </head>
 <body>
@@ -23,16 +20,27 @@
 
   <script>
     let port;
+    let readBuffer = ""; // For collecting partial serial data
+
+    const HR_BUFFER_SIZE = 10;
+    const SPO2_BUFFER_SIZE = 10;
+    let hrBuffer = Array(HR_BUFFER_SIZE).fill(0);
+    let spo2Buffer = Array(SPO2_BUFFER_SIZE).fill(0);
+    let hrIndex = 0, spo2Index = 0;
+
+    const MAX_POINTS = 100; // Keep only last 100 points for scrolling
+
     const ecgData = {
-      labels: [],
+      labels: Array(MAX_POINTS).fill(''),
       datasets: [{
         label: 'ECG Signal',
-        data: [],
+        data: Array(MAX_POINTS).fill(150), // start at baseline
         borderColor: 'red',
         fill: false,
-        tension: 0.1
+        tension: 0.3 // smoother curves
       }]
     };
+
     const ecgChart = new Chart(document.getElementById('ecgChart'), {
       type: 'line',
       data: ecgData,
@@ -40,7 +48,7 @@
         animation: false,
         scales: {
           x: { display: false },
-          y: { suggestedMin: 0, suggestedMax: 1024 }
+          y: { suggestedMin: 140, suggestedMax: 160 } // initial range
         }
       }
     });
@@ -56,53 +64,72 @@
 
         while (true) {
           const { value, done } = await inputStream.read();
-          if (done) {
-            inputStream.releaseLock();
-            break;
-          }
-          if (value) processLine(value.trim());
+          if (done) break;
+          if (value) handleSerialData(value);
         }
       } catch (err) {
         alert("Failed to connect: " + err);
       }
     }
 
-    function processLine(line) {
-      console.log("Received:", line);
-      if (!line.includes(",")) return;
+    function handleSerialData(chunk) {
+      readBuffer += chunk;
+      let lines = readBuffer.split("\n");
+      readBuffer = lines.pop(); // keep incomplete line
 
-      const [hr, spo2, ecg] = line.split(",").map(parseFloat);
+      for (let line of lines) {
+        processLine(line.trim());
+      }
+    }
+
+    function movingAverage(buffer, newValue, index) {
+      buffer[index] = newValue;
+      return buffer.reduce((a,b) => a+b, 0) / buffer.length;
+    }
+
+    function processLine(line) {
+      if (!line.includes(",")) return;
+      const parts = line.split(",");
+      if (parts.length < 3) return;
+
+      const hr = parseFloat(parts[0]);
+      const spo2 = parseFloat(parts[1]);
+      const ecg = parseFloat(parts[2]);
+
       if (isNaN(hr) || isNaN(spo2) || isNaN(ecg)) return;
 
-      // Update values
-      document.getElementById('hr').innerText = hr.toFixed(1);
-      document.getElementById('spo2').innerText = spo2.toFixed(1);
+      // Smooth HR and SpO2
+      const avgHR = movingAverage(hrBuffer, hr, hrIndex);
+      const avgSpO2 = movingAverage(spo2Buffer, spo2, spo2Index);
+      hrIndex = (hrIndex + 1) % HR_BUFFER_SIZE;
+      spo2Index = (spo2Index + 1) % SPO2_BUFFER_SIZE;
 
-      // Check for heart rate alert
-      const hrAlert = document.getElementById('hrAlert');
-      if (hr > 120) {
-        hrAlert.innerText = "⚠️ High heart rate!";
-      } else if (hr < 50) {
-        hrAlert.innerText = "⚠️ Low heart rate!";
-      } else {
-        hrAlert.innerText = "";
-      }
+      // Update UI
+      document.getElementById('hr').innerText = avgHR.toFixed(1);
+      document.getElementById('spo2').innerText = avgSpO2.toFixed(1);
 
-      // Check for SpO2 alert
-      const spo2Alert = document.getElementById('spo2Alert');
-      if (spo2 < 90) {
-        spo2Alert.innerText = "⚠️ Low SpO2 level!";
-      } else {
-        spo2Alert.innerText = "";
-      }
+      document.getElementById('hrAlert').innerText =
+        (avgHR > 120) ? "⚠️ High heart rate!" :
+        (avgHR < 50) ? "⚠️ Low heart rate!" : "";
 
-      // Update ECG chart
-      ecgData.labels.push('');
-      ecgData.datasets[0].data.push(ecg);
-      if (ecgData.labels.length > 100) {
-        ecgData.labels.shift();
-        ecgData.datasets[0].data.shift();
-      }
+      document.getElementById('spo2Alert').innerText =
+        (avgSpO2 < 90) ? "⚠️ Low SpO2 level!" : "";
+
+      // --- Update ECG chart with analog-like waveform ---
+      const baseline = 150; // midpoint of sensor
+      const scale = 5;      // amplify small variations
+      const smoothECG = baseline + (ecg - baseline) * scale;
+
+      ecgData.datasets[0].data.push(smoothECG);
+      ecgData.datasets[0].data.shift(); // remove oldest point
+
+      // Auto-scale y-axis
+      const recentData = ecgData.datasets[0].data;
+      const minECG = Math.min(...recentData);
+      const maxECG = Math.max(...recentData);
+      ecgChart.options.scales.y.min = minECG - 5;
+      ecgChart.options.scales.y.max = maxECG + 5;
+
       ecgChart.update();
     }
   </script>
